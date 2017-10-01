@@ -50,10 +50,6 @@ Param(
     [string[]]$ScriptArgs
 )
 
-#Write-Host "Loading module WebAdministration..."
-#$webAdmModule = get-module -name "WebAdministration" -ListAvailable
-#if($webAdmModule) { $webAdmModule | import-module }
-
 [Reflection.Assembly]::LoadWithPartialName("System.Security") | Out-Null
 function MD5HashFile([string] $filePath)
 {
