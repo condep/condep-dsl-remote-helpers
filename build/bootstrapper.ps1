@@ -178,5 +178,5 @@ if (!(Test-Path $CAKE_EXE)) {
 
 # Start Cake
 Write-Host "Running build script..."
-Invoke-Expression "& `"$CAKE_EXE`" `"$Script`" --paths_tools=./.cake --paths_addins=./.cake/Addins --paths_modules=./.cake/Modules -target=`"$Target`" -configuration=`"$Configuration`" -verbosity=`"$Verbosity`" $UseDryRun $UseExperimental $ScriptArgs"
+Invoke-Expression "& `"$CAKE_EXE`" `"$PSScriptRoot/build/$Script`" --paths_tools=./.cake --paths_addins=./.cake/Addins --paths_modules=./.cake/Modules -target=`"$Target`" -configuration=`"$Configuration`" -verbosity=`"$Verbosity`" $UseDryRun $UseExperimental $ScriptArgs"
 exit $LASTEXITCODE
