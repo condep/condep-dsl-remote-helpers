@@ -2,6 +2,7 @@ version: 5.0.2-beta{build}
 branches:
   only:
   - master
+image: Visual Studio 2017
 configuration:
 - Release
 install:

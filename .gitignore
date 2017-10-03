@@ -156,3 +156,4 @@ $RECYCLE.BIN/
 .DS_Store
 
 */.cake/
+src/.vs/
