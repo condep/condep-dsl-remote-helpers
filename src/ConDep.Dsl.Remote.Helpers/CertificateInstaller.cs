@@ -1,6 +1,9 @@
-﻿using System;
+﻿using Microsoft.Win32.SafeHandles;
+using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -107,24 +110,42 @@ namespace ConDep.Dsl.Remote.Helpers
                 {
                     var storeCert = result[0];
 
-                    var rsa = storeCert.PrivateKey as RSACryptoServiceProvider;
-                    var cspParams = new CspParameters(rsa.CspKeyContainerInfo.ProviderType, rsa.CspKeyContainerInfo.ProviderName,
-                                                      rsa.CspKeyContainerInfo.KeyContainerName)
+                    bool cng = false;
+                    FileSecurity acl;
+                    SafeNCryptKeyHandle handle;
+                    try
                     {
-                        Flags = CspProviderFlags.UseExistingKey | CspProviderFlags.UseMachineKeyStore,
-                        CryptoKeySecurity = rsa.CspKeyContainerInfo.CryptoKeySecurity
-                    };
+                        handle = GetCspPrivateKeyFromCertificate(storeCert);
+                        acl = GetCspACL(handle);
+                    }
+                    catch (Win32Exception e)
+                    {
+                        try
+                        {
+                            handle = GetCngPrivateKeyFromCertificate(storeCert);
+                            acl = GetACL(handle);
+                            cng = true;
+                        }
+                        catch (Win32Exception e2)
+                        {
+                            throw new AggregateException(e, e2);
+                        }
+                    }
 
                     foreach (var user in privateKeyUsers)
                     {
-                        cspParams.CryptoKeySecurity.AddAccessRule(new CryptoKeyAccessRule(user, CryptoKeyRights.GenericRead,
-                                                                                          AccessControlType.Allow));
+                        acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Read, AccessControlType.Allow));
                     }
 
-                    using (var rsa2 = new RSACryptoServiceProvider(cspParams))
+                    if (cng)
                     {
-                        // Only created to persist the rule change in the CryptoKeySecurity
+                        SetACL(handle, acl);
                     }
+                    else
+                    {
+                        SetCspACL(handle, acl);
+                    }
+
                     return;
                 }
 
@@ -172,6 +193,302 @@ namespace ConDep.Dsl.Remote.Helpers
         {
             File.Delete(filePath);
             Console.WriteLine("Certificate removed from disk.");
+        }
+        
+        public enum ErrorCode
+        {
+            Success = 0, // ERROR_SUCCESS 
+        }
+
+        [Flags]
+        [CLSCompliantAttribute(false)]
+        public enum SECURITY_INFORMATION : uint
+        {
+            DACL_SECURITY_INFORMATION = 0x00000004,
+        }
+        [CLSCompliantAttribute(false)]
+        public enum ProvParam : uint
+        {
+            PP_KEYSET_SEC_DESCR = 8,
+        }
+        [CLSCompliantAttribute(false)]
+        public enum KeySpec : uint
+        {
+            NONE = 0x0,
+            AT_KEYEXCHANGE = 0x1,
+            AT_SIGNATURE = 2,
+            CERT_NCRYPT_KEY_SPEC = 0xFFFFFFFF
+        }
+
+        [Flags]
+        private enum CryptAcquireKeyFlagControl : uint
+        {
+            CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG = 0x00010000,
+            CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG = 0x00020000,
+            CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG = 0x00040000,
+        }
+
+        [Flags]
+        [CLSCompliantAttribute(false)]
+        public enum CryptAcquireKeyFlags : uint
+        {
+            CRYPT_ACQUIRE_CACHE_FLAG = 0x00000001,
+            CRYPT_ACQUIRE_USE_PROV_INFO_FLAG = 0x00000002,
+            CRYPT_ACQUIRE_COMPARE_KEY_FLAG = 0x00000004,
+            CRYPT_ACQUIRE_NO_HEALING = 0x00000008,
+            CRYPT_ACQUIRE_SILENT_FLAG = 0x00000040,
+        }
+
+        [Flags]
+        [CLSCompliantAttribute(false)]
+        public enum CryptAcquireNCryptKeyFlags : uint
+        {
+            CRYPT_ACQUIRE_CACHE_FLAG = CryptAcquireKeyFlags.CRYPT_ACQUIRE_CACHE_FLAG | CryptAcquireKeyFlagControl.CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+            CRYPT_ACQUIRE_USE_PROV_INFO_FLAG = CryptAcquireKeyFlags.CRYPT_ACQUIRE_USE_PROV_INFO_FLAG | CryptAcquireKeyFlagControl.CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+            CRYPT_ACQUIRE_COMPARE_KEY_FLAG = CryptAcquireKeyFlags.CRYPT_ACQUIRE_COMPARE_KEY_FLAG | CryptAcquireKeyFlagControl.CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+            CRYPT_ACQUIRE_NO_HEALING = CryptAcquireKeyFlags.CRYPT_ACQUIRE_NO_HEALING | CryptAcquireKeyFlagControl.CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+            CRYPT_ACQUIRE_SILENT_FLAG = CryptAcquireKeyFlags.CRYPT_ACQUIRE_SILENT_FLAG | CryptAcquireKeyFlagControl.CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG,
+        }
+
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [CLSCompliantAttribute(false)]
+        public static extern bool CryptAcquireCertificatePrivateKey(
+            IntPtr pCert,
+            CryptAcquireKeyFlags dwFlags,
+            IntPtr pvParameters,
+            out SafeNCryptKeyHandle phCryptProvOrNCryptKey,
+            out KeySpec pdwKeySpec,
+            out bool pfCallerFreeProvOrNCryptKey);
+
+
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [CLSCompliantAttribute(false)]
+        public static extern bool CryptAcquireCertificatePrivateKey(
+            IntPtr pCert,
+            CryptAcquireNCryptKeyFlags dwFlags,
+            IntPtr pvParameters,
+            out SafeNCryptKeyHandle phCryptProvOrNCryptKey,
+            out KeySpec pdwKeySpec,
+            out bool pfCallerFreeProvOrNCryptKey);
+
+        [DllImport("ncrypt.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [CLSCompliantAttribute(false)]
+        public static extern ErrorCode NCryptGetProperty(
+            SafeHandle hObject,
+            [MarshalAs(UnmanagedType.LPWStr)] string pszProperty,
+            SafeSecurityDescriptorPtr pbOutput,
+            uint cbOutput,
+            ref uint pcbResult,
+            SECURITY_INFORMATION dwFlags);
+
+        [DllImport("ncrypt.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [CLSCompliantAttribute(false)]
+        public static extern ErrorCode NCryptSetProperty(
+            SafeHandle hObject,
+            [MarshalAs(UnmanagedType.LPWStr)] string pszProperty,
+            [MarshalAs(UnmanagedType.LPArray)] byte[] pbInput,
+            uint cbInput,
+            SECURITY_INFORMATION dwFlags);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetSecurityDescriptorDacl(
+            IntPtr pSecurityDescriptor,
+            [MarshalAs(UnmanagedType.Bool)] out bool bDaclPresent,
+            ref IntPtr pDacl,
+            [MarshalAs(UnmanagedType.Bool)] out bool bDaclDefaulted);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [CLSCompliantAttribute(false)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CryptGetProvParam(
+            SafeHandle hProv,
+            ProvParam dwParam,
+            SafeSecurityDescriptorPtr pbData,
+            ref uint pdwDataLen,
+            SECURITY_INFORMATION dwFlags);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [CLSCompliantAttribute(false)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CryptSetProvParam(
+            SafeHandle hProv,
+            ProvParam dwParam,
+            [MarshalAs(UnmanagedType.LPArray)] byte[] pbData,
+            SECURITY_INFORMATION dwFlags);
+
+        public class SafeSecurityDescriptorPtr : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            private static SafeSecurityDescriptorPtr nullHandle = new SafeSecurityDescriptorPtr();
+
+            private int size = -1;
+
+            public SafeSecurityDescriptorPtr()
+                : base(true)
+            {
+            }
+
+            [CLSCompliantAttribute(false)]
+            public SafeSecurityDescriptorPtr(uint size)
+                : base(true)
+            {
+                this.size = (int)size;
+                this.SetHandle(Marshal.AllocHGlobal(this.size));
+            }
+
+            public byte[] GetHandleCopy()
+            {
+                if (size < 0)
+                {
+                    throw new NotSupportedException();
+                }
+
+                byte[] buffer = new byte[size];
+                Marshal.Copy(this.handle, buffer, 0, buffer.Length);
+
+                return buffer;
+            }
+
+            protected override bool ReleaseHandle()
+            {
+                try
+                {
+                    Marshal.FreeHGlobal(this.handle);
+                }
+                catch
+                {
+                    return false;
+                }
+                return true;
+            }
+        }
+        static FileSecurity GetCspACL(SafeNCryptKeyHandle handle)
+        {
+            uint securityDescriptorSize = 0;
+            if (!CryptGetProvParam(
+                    handle,
+                    ProvParam.PP_KEYSET_SEC_DESCR,
+                    new SafeSecurityDescriptorPtr(),
+                    ref securityDescriptorSize,
+                    SECURITY_INFORMATION.DACL_SECURITY_INFORMATION))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            SafeSecurityDescriptorPtr securityDescriptorBuffer = new SafeSecurityDescriptorPtr(securityDescriptorSize);
+
+            if (!CryptGetProvParam(
+                    handle,
+                    ProvParam.PP_KEYSET_SEC_DESCR,
+                    securityDescriptorBuffer,
+                    ref securityDescriptorSize,
+                    SECURITY_INFORMATION.DACL_SECURITY_INFORMATION))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            using (securityDescriptorBuffer)
+            {
+                FileSecurity acl = new FileSecurity();
+                acl.SetSecurityDescriptorBinaryForm(securityDescriptorBuffer.GetHandleCopy());
+                return acl;
+            }
+        }
+
+        static void SetCspACL(SafeNCryptKeyHandle handle, FileSecurity acl)
+        {
+            if (!CryptSetProvParam(
+                handle,
+                ProvParam.PP_KEYSET_SEC_DESCR,
+                acl.GetSecurityDescriptorBinaryForm(),
+                SECURITY_INFORMATION.DACL_SECURITY_INFORMATION))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+        static FileSecurity GetACL(SafeNCryptKeyHandle handle)
+        {
+            uint securityDescriptorSize = 0;
+            var code = NCryptGetProperty(
+                handle,
+                "Security Descr",
+                new SafeSecurityDescriptorPtr(),
+                0,
+                ref securityDescriptorSize,
+                SECURITY_INFORMATION.DACL_SECURITY_INFORMATION);
+            if (code != ErrorCode.Success)
+            {
+                throw new Win32Exception((int)code);
+            }
+
+
+            SafeSecurityDescriptorPtr securityDescriptorBuffer = new SafeSecurityDescriptorPtr(securityDescriptorSize);
+
+            code = NCryptGetProperty(
+                handle,
+                "Security Descr",
+                securityDescriptorBuffer,
+                securityDescriptorSize,
+                ref securityDescriptorSize,
+                SECURITY_INFORMATION.DACL_SECURITY_INFORMATION);
+            if (code != ErrorCode.Success)
+            {
+                throw new Win32Exception((int)code);
+            }
+
+            using (securityDescriptorBuffer)
+            {
+                FileSecurity acl = new FileSecurity();
+                acl.SetSecurityDescriptorBinaryForm(securityDescriptorBuffer.GetHandleCopy());
+                return acl;
+            }
+        }
+
+        private static void SetACL(SafeNCryptKeyHandle handle, FileSecurity acl)
+        {
+            byte[] sd = acl.GetSecurityDescriptorBinaryForm();
+            var code = NCryptSetProperty(
+                handle,
+                "Security Descr",
+                sd,
+                (uint)sd.Length,
+                SECURITY_INFORMATION.DACL_SECURITY_INFORMATION);
+            if (code != ErrorCode.Success)
+            {
+                throw new Win32Exception((int)code);
+            }
+        }
+
+        private static SafeNCryptKeyHandle GetCngPrivateKeyFromCertificate(X509Certificate2 certificate)
+        {
+            SafeNCryptKeyHandle ncryptKeyHandle;
+            if (!CryptAcquireCertificatePrivateKey(
+                    certificate.Handle,
+                    CryptAcquireNCryptKeyFlags.CRYPT_ACQUIRE_SILENT_FLAG | CryptAcquireNCryptKeyFlags.CRYPT_ACQUIRE_CACHE_FLAG,
+                    IntPtr.Zero,
+                    out ncryptKeyHandle,
+                    out KeySpec keySpec,
+                    out bool ownHandle))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return ncryptKeyHandle;
+        }
+
+        private static SafeNCryptKeyHandle GetCspPrivateKeyFromCertificate(X509Certificate2 certificate)
+        {
+            SafeNCryptKeyHandle cspHandle;
+            if (!CryptAcquireCertificatePrivateKey(
+                certificate.Handle,
+                CryptAcquireKeyFlags.CRYPT_ACQUIRE_SILENT_FLAG | CryptAcquireKeyFlags.CRYPT_ACQUIRE_CACHE_FLAG,
+                IntPtr.Zero,
+                out cspHandle,
+                out KeySpec keySpec,
+                out bool ownHandle))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return cspHandle;
         }
     }
 }
